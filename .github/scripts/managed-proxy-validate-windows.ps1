@@ -25,12 +25,19 @@ if (-not [ManagedProxyToken]::GetTokenInformation($identity.Token, 20, [ref]$ele
     throw 'Child token elevation verification failed'
 }
 Write-Host "Verified standard-user token SID $($identity.User.Value), TokenElevation=0"
-$profile = [Environment]::GetFolderPath('UserProfile')
-if (-not (Test-Path $profile -PathType Container) -or
-    -not $env:USERPROFILE.Equals($profile, [StringComparison]::OrdinalIgnoreCase) -or
-    -not (Test-Path $env:APPDATA -PathType Container)) {
-    throw 'Child did not receive its loaded account profile'
+# Start-Process uses a deliberately fresh environment. Resolve the loaded
+# profile's Known Folders under this verified token before launching tools.
+$accountProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$applicationData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData, [Environment+SpecialFolderOption]::Create)
+$localApplicationData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData, [Environment+SpecialFolderOption]::Create)
+foreach ($path in @($accountProfile, $applicationData, $localApplicationData)) {
+    if (-not $path -or -not (Test-Path $path -PathType Container)) {
+        throw 'Child could not resolve its loaded account profile'
+    }
 }
+$env:USERPROFILE = $accountProfile
+$env:APPDATA = $applicationData
+$env:LOCALAPPDATA = $localApplicationData
 
 $binDir = [IO.Path]::GetFullPath((Join-Path $env:CARGO_HOME '..\bin'))
 foreach ($tool in @('cargo', 'rustc', 'cargo-nextest', 'just', 'dotslash', 'uv')) {
