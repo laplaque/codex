@@ -16,7 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-14, windows-2022]
+        # Windows Server 2025 supports the Dev Drive required by setup-ci.
+        runner: [ubuntu-24.04, macos-14, windows-2025]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     defaults:
