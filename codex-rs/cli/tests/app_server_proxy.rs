@@ -215,7 +215,21 @@ impl Client {
 
     async fn disconnect(mut self) -> Result<()> {
         eprintln!("proxy {:?}: disconnect", self.child.id());
-        self.ws.close(/*msg*/ None).await?;
+        self.ws.send(Message::Close(None)).await?;
+        timeout(DEADLINE, async {
+            let mut acknowledged = false;
+            while let Some(message) = self.ws.next().await {
+                if matches!(message?, Message::Close(_)) {
+                    acknowledged = true;
+                }
+            }
+            ensure!(
+                acknowledged,
+                "proxy closed without WebSocket close acknowledgment"
+            );
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
         drop(self.ws);
         ensure!(
             timeout(DEADLINE, self.child.wait()).await??.success(),
