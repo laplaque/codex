@@ -42,6 +42,21 @@ fn managed_proxy_rejects_profile() -> anyhow::Result<()> {
 }
 
 #[test]
+fn managed_proxy_rejects_images_without_other_interactive_options() {
+    let server = app_server_from_args(&["codex", "app-server", "proxy", "--start-daemon"]);
+    let mut interactive = TuiCli::parse_from(["codex"]);
+    interactive.images.push("fixture.png".into());
+
+    let error = app_server_proxy::validate(&server, &CliConfigOverrides::default(), &interactive)
+        .expect_err("images cannot configure a shared daemon");
+    assert!(
+        error
+            .to_string()
+            .contains("does not accept configuration overrides")
+    );
+}
+
+#[test]
 fn plain_app_server_still_uses_stdio() {
     let server = app_server_from_args(&["codex", "app-server"]);
     assert!(server.subcommand.is_none());
