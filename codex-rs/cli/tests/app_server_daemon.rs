@@ -19,6 +19,7 @@ struct TestDaemon {
     home: TempDir,
     codex: PathBuf,
     unmanaged: Option<Child>,
+    started: Instant,
 }
 
 impl TestDaemon {
@@ -73,6 +74,7 @@ impl TestDaemon {
             home,
             codex,
             unmanaged: None,
+            started,
         })
     }
 
@@ -84,14 +86,18 @@ impl TestDaemon {
 
     fn lifecycle(&self, action: &str) -> Result<Value> {
         let started = Instant::now();
-        eprintln!("daemon lifecycle {action}: starting");
+        eprintln!(
+            "daemon lifecycle {action}: starting at {:?}",
+            self.started.elapsed()
+        );
         let output = self
             .command()
             .args(["app-server", "daemon", action])
             .output()?;
         eprintln!(
-            "daemon lifecycle {action}: returned in {:?}",
-            started.elapsed()
+            "daemon lifecycle {action}: returned in {:?}, total {:?}",
+            started.elapsed(),
+            self.started.elapsed()
         );
         ensure!(
             output.status.success(),
@@ -291,6 +297,8 @@ fn managed_starts_ensure_one_updater_and_recover_a_missing_one() -> Result<()> {
     assert_ne!(replacement_pid, updater_pid);
     if let Some(native) = native {
         legacy["processIdentity"] = native;
+        let promotion_started = Instant::now();
+        eprintln!("waiting for legacy PID record promotion");
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let record: Value = serde_json::from_slice(&std::fs::read(&server_record_path)?)?;
@@ -303,6 +311,10 @@ fn managed_starts_ensure_one_updater_and_recover_a_missing_one() -> Result<()> {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+        eprintln!(
+            "legacy PID record promoted in {:?}",
+            promotion_started.elapsed()
+        );
     }
     assert_eq!(daemon.lifecycle("restart")?["status"], "restarted");
     assert_ne!(daemon.pid("app-server.pid")?, backend_pid);
