@@ -34,6 +34,10 @@ struct Daemon {
 
 impl Daemon {
     fn new() -> Result<Self> {
+        // macOS's default temporary directory can exceed the AF_UNIX path limit.
+        #[cfg(unix)]
+        let home = tempfile::tempdir_in("/tmp")?;
+        #[cfg(not(unix))]
         let home = tempfile::tempdir()?;
         let binary = codex_utils_cargo_bin::cargo_bin("codex")?.canonicalize()?;
         let managed = home.path().join("packages/app-server-daemon/current/bin");
@@ -156,6 +160,7 @@ impl Client {
     }
 
     async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
+        eprintln!("proxy {:?}: request {method}", self.child.id());
         // Reusing an ID across connections exercises connection-scoped responses.
         self.send(json!({"id": 1, "method": method, "params": params}))
             .await?;
@@ -163,10 +168,12 @@ impl Client {
             .receive(|value| value["id"] == 1 && value.get("method").is_none())
             .await?;
         ensure!(response.get("error").is_none(), "{method}: {response}");
+        eprintln!("proxy {:?}: response {method}", self.child.id());
         Ok(response["result"].clone())
     }
 
     async fn event(&mut self, method: &str) -> Result<Value> {
+        eprintln!("proxy {:?}: waiting for {method}", self.child.id());
         Ok(self.receive(|value| value["method"] == method).await?["params"].clone())
     }
 
@@ -185,6 +192,7 @@ impl Client {
     }
 
     async fn disconnect(mut self) -> Result<()> {
+        eprintln!("proxy {:?}: disconnect", self.child.id());
         self.ws.close(/*msg*/ None).await?;
         drop(self.ws);
         ensure!(
@@ -354,7 +362,7 @@ async fn shared_proxy_queue_approvals_and_reconnect_use_one_owner() -> Result<()
         create_escalated_command_execution_sse_response(
             vec!["echo".into(), "approval".into()],
             /*workdir*/ None,
-            /*timeout_ms*/ None,
+            /*timeout_ms*/ Some(10_000),
             "approval-call",
         )?,
         create_final_assistant_message_sse_response("active done")?,
@@ -384,6 +392,7 @@ async fn shared_proxy_queue_approvals_and_reconnect_use_one_owner() -> Result<()
         first.event("turn/started").await?,
         second.event("turn/started").await?
     );
+    eprintln!("waiting for initial approval on both clients");
     let approval = first
         .receive(|v| v["method"] == "item/commandExecution/requestApproval")
         .await?;
@@ -426,6 +435,7 @@ async fn shared_proxy_queue_approvals_and_reconnect_use_one_owner() -> Result<()
             .rpc("thread/queue/list", json!({"threadId": thread}))
             .await?
     );
+    eprintln!("waiting for replayed approval after reconnect");
     assert_eq!(
         approval,
         first

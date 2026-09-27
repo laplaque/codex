@@ -23,6 +23,8 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn new() -> Result<Self> {
+        let started = Instant::now();
+        eprintln!("preparing daemon fixture");
         let home = tempfile::Builder::new().tempdir_in("/tmp")?;
         let codex = codex_utils_cargo_bin::cargo_bin("codex")?;
         let codex_source = std::fs::canonicalize(&codex)?;
@@ -66,6 +68,7 @@ impl TestDaemon {
         let state = home.path().join("app-server-daemon");
         std::fs::create_dir(&state)?;
         std::fs::write(state.join("app-server.stderr.log"), b"")?;
+        eprintln!("daemon fixture prepared in {:?}", started.elapsed());
         Ok(Self {
             home,
             codex,
@@ -80,10 +83,16 @@ impl TestDaemon {
     }
 
     fn lifecycle(&self, action: &str) -> Result<Value> {
+        let started = Instant::now();
+        eprintln!("daemon lifecycle {action}: starting");
         let output = self
             .command()
             .args(["app-server", "daemon", action])
             .output()?;
+        eprintln!(
+            "daemon lifecycle {action}: returned in {:?}",
+            started.elapsed()
+        );
         ensure!(
             output.status.success(),
             "daemon {action} failed: {}",
@@ -125,6 +134,7 @@ fn signal(pid: u32, signal: libc::c_int) -> Result<()> {
 }
 
 fn wait_for_exit(pid: u32) -> Result<()> {
+    eprintln!("waiting for process {pid} to exit");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let output = Command::new("/bin/ps")
@@ -502,6 +512,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         std::fs::create_dir_all(package.join(directory))?;
     }
     copy_executable(&daemon.codex, &package.join("bin/codex"))?;
+    eprintln!("packaged daemon fixture copied");
     daemon.codex = package.join("bin/codex");
     for helper in [
         "bin/codex-code-mode-host",
@@ -542,11 +553,13 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         br#"{"shutdownGraceSeconds":0}"#,
     )?;
     let cli_before = daemon.codex.canonicalize()?;
+    eprintln!("packaged daemon {action}: starting");
     let result = daemon
         .command()
         .args(["app-server", "daemon", action])
         .output()
         .context("failed to launch packaged daemon fixture")?;
+    eprintln!("packaged daemon {action}: returned");
     ensure!(
         result.status.success(),
         "{}",
@@ -590,6 +603,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         let original = initial_current.canonicalize()?;
         let original_pid = daemon.pid(initial_pid_file)?;
         let settings_before = std::fs::read(state.join("settings.json"))?;
+        eprintln!("packaged daemon: checking unconfirmed replacement");
         let refused = daemon
             .command()
             .args(["app-server", "daemon", "update", "--from-cli"])
@@ -603,6 +617,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         }
 
         std::fs::remove_file(package.join("bin/codex-code-mode-host"))?;
+        eprintln!("packaged daemon: checking incomplete replacement");
         let invalid = daemon
             .command()
             .args(["app-server", "daemon", "update", "--from-cli", "--yes"])
@@ -621,10 +636,12 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
             package.join("bin/codex-code-mode-host"),
             std::fs::Permissions::from_mode(0o755),
         )?;
+        eprintln!("packaged daemon: replacing from CLI");
         let replaced = daemon
             .command()
             .args(["app-server", "daemon", "update", "--from-cli", "--yes"])
             .output()?;
+        eprintln!("packaged daemon: replacement returned");
         ensure!(
             replaced.status.success(),
             "{}",
