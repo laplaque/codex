@@ -60,26 +60,44 @@ jobs:
         with:
           version: "0.11.3"
       - name: Record actual tool versions
+        id: versions
         working-directory: codex-rs
         run: |
           rustc --version --verbose
+          echo "target=$(rustc --version --verbose | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
           cargo --version
           just --version
           cargo nextest --version
       - name: CLI suite
         run: just test -p codex-cli
       - name: Existing lifecycle suite
+        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
         run: just test -p codex-app-server-daemon
       - name: Existing proxy transport suite
+        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
         run: just test -p codex-stdio-to-uds
+      - uses: ./.github/actions/setup-rusty-v8
+        id: v8
+        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
+        with:
+          target: ${{ steps.versions.outputs.target }}
+      - name: Build runtime helpers required by the app-server suite
+        id: helpers
+        if: ${{ !cancelled() && steps.v8.outcome == 'success' }}
+        working-directory: codex-rs
+        run: cargo build -p codex-code-mode-host -p codex-rmcp-client --bins
       - name: Existing app-server suite
+        if: ${{ !cancelled() && steps.helpers.outcome == 'success' }}
         run: just test -p codex-app-server
       # Repository instructions require fix/fmt last, with no test rerun after them.
       - name: CLI lint fixes
+        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
         run: just fix -p codex-cli
       - name: Repository formatting
+        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
         run: just fmt
       - name: Require fixers to leave the tested revision unchanged
+        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
         run: |
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
