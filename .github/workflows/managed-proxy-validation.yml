@@ -1,0 +1,84 @@
+name: Managed proxy validation
+
+on:
+  push:
+    branches: [feat/managed-proxy-start]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'laplaque/codex'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Record revision and original local failure
+        run: |
+          {
+            echo "Tested SHA: $(git rev-parse HEAD)"
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo 'Original local command: just test -p codex-cli --bin codex app_server_proxy'
+            echo 'Local compiler: rustc 1.98.1 (48a229cea 2026-09-01); repository pin: 1.95.0.'
+            echo 'Compilation failed before tests: queries overflow the depth limit in codex-chatgpt.'
+            echo 'The diagnostic reported depth 130 computing the layout of connectors::list_connectors() and suggested recursion_limit = "256".'
+            echo 'This happened before production implementation changes. No recursion limit or dependency was changed to hide it.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: ./.github/actions/setup-ci
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev bubblewrap
+      - name: Read repository toolchain pin
+        id: toolchain
+        run: |
+          python3 -c 'import os, tomllib; from pathlib import Path; toolchain = tomllib.loads(Path("codex-rs/rust-toolchain.toml").read_text())["toolchain"]; print("channel=" + toolchain["channel"]); print("components=" + ",".join(toolchain["components"]))' >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # pinned action used by rust-ci
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: ${{ steps.toolchain.outputs.components }}
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+          version: 0.9.103
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+      - name: Record actual tool versions
+        working-directory: codex-rs
+        run: |
+          rustc --version --verbose
+          cargo --version
+          just --version
+          cargo nextest --version
+      - name: CLI suite
+        run: just test -p codex-cli
+      - name: Existing lifecycle suite
+        run: just test -p codex-app-server-daemon
+      - name: Existing proxy transport suite
+        run: just test -p codex-stdio-to-uds
+      - name: Existing app-server suite
+        run: just test -p codex-app-server
+      # Repository instructions require fix/fmt last, with no test rerun after them.
+      - name: CLI lint fixes
+        run: just fix -p codex-cli
+      - name: Repository formatting
+        run: just fmt
+      - name: Require fixers to leave the tested revision unchanged
+        run: |
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
