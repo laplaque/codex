@@ -43,7 +43,7 @@ try {
     New-Item -ItemType Directory -Path $toolchainsDir -ErrorAction Stop | Out-Null
     Copy-Item $toolchain.FullName -Destination (Join-Path $toolchainsDir $toolchain.Name) -Recurse -ErrorAction Stop
     foreach ($tool in @('cargo', 'rustc', 'rustup', 'cargo-nextest', 'just', 'dotslash', 'uv')) {
-        $command = Get-Command "$tool.exe" -CommandType Application -ErrorAction Stop
+        $command = Get-Command "$tool.exe" -CommandType Application -ErrorAction Stop | Select-Object -First 1
         Copy-Item $command.Source (Join-Path $binDir "$tool.exe") -ErrorAction Stop
     }
 
@@ -105,7 +105,8 @@ try {
     $stderr = Join-Path $taskRoot 'stderr.log'
     # Start-Process ignores its -Environment hashtable when -Credential and
     # -UseNewEnvironment are combined. ProcessStartInfo sends the explicit block.
-    $startInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
+    $pwsh = Get-Command pwsh.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $startInfo = [Diagnostics.ProcessStartInfo]::new($pwsh.Source)
     foreach ($argument in @('-NoLogo', '-NoProfile', '-File', (Join-Path $env:GITHUB_WORKSPACE '.github/scripts/managed-proxy-validate-windows.ps1'))) {
         $startInfo.ArgumentList.Add($argument)
     }

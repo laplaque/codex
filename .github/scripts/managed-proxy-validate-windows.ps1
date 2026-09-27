@@ -28,7 +28,7 @@ if (-not [ManagedProxyToken]::GetTokenInformation($identity.Token, 20, [ref]$ele
     throw 'Child token elevation verification failed'
 }
 Write-Host "Verified standard-user token SID $($identity.User.Value), TokenElevation=0"
-# Start-Process uses a deliberately fresh environment. Resolve the loaded
+# The launcher supplies a deliberately fresh environment. Resolve the loaded
 # profile's Known Folders under this verified token before launching tools.
 $accountProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $applicationData = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData, [Environment+SpecialFolderOption]::Create)
@@ -44,7 +44,7 @@ $env:LOCALAPPDATA = $localApplicationData
 
 $binDir = [IO.Path]::GetFullPath((Join-Path $env:CARGO_HOME '..\bin'))
 foreach ($tool in @('cargo', 'rustc', 'cargo-nextest', 'just', 'dotslash', 'uv')) {
-    $resolved = (Get-Command "$tool.exe" -CommandType Application -ErrorAction Stop).Source
+    $resolved = (Get-Command "$tool.exe" -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     if (-not $resolved.Equals((Join-Path $binDir "$tool.exe"), [StringComparison]::OrdinalIgnoreCase)) {
         throw "Tool $tool did not resolve from the task-scoped tool directory: $resolved"
     }
