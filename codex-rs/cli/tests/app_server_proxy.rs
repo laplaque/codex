@@ -73,7 +73,7 @@ impl Daemon {
 
     fn pid_record(&self) -> Result<Vec<u8>> {
         Ok(std::fs::read(
-            self.home.path().join("app-server-daemon/app-server.pid"),
+            self.home.path().join("app-server-daemon/daemon.pid"),
         )?)
     }
 }
@@ -138,7 +138,7 @@ impl Client {
 
     async fn receive(&mut self, matches: impl Fn(&Value) -> bool) -> Result<Value> {
         if let Some(index) = self.pending.iter().position(&matches) {
-            return Ok(self.pending.remove(index).context("buffered message")?);
+            return self.pending.remove(index).context("buffered message");
         }
         timeout(DEADLINE, async {
             loop {
@@ -170,6 +170,20 @@ impl Client {
         Ok(self.receive(|value| value["method"] == method).await?["params"].clone())
     }
 
+    async fn start_persisted_thread(&mut self) -> Result<Value> {
+        let thread = self.rpc("thread/start", json!({})).await?["thread"]["id"].clone();
+        // Resume reads persisted metadata; a new thread is materialized by its first turn.
+        self.rpc(
+            "turn/start",
+            json!({"threadId": thread, "input": [{"type": "text", "text": "materialize"}]}),
+        )
+        .await?;
+        self.event("turn/started").await?;
+        let completed = self.event("turn/completed").await?;
+        assert_eq!(completed["turn"]["status"], "completed");
+        Ok(thread)
+    }
+
     async fn disconnect(mut self) -> Result<()> {
         self.ws.close(/*msg*/ None).await?;
         drop(self.ws);
@@ -183,61 +197,77 @@ impl Client {
 
 #[tokio::test]
 async fn managed_proxy_starts_once_and_disconnect_leaves_other_client_alive() -> Result<()> {
+    let server =
+        create_mock_responses_server_sequence(vec![create_final_assistant_message_sse_response(
+            "ready",
+        )?])
+        .await;
     let daemon = Daemon::new()?;
-    // Both clients attempt startup before either waits for readiness.
-    let (first, second) = tokio::try_join!(Client::connect(&daemon), Client::connect(&daemon))?;
-    let mut first = first;
-    let mut second = second;
-    let pid = daemon.pid_record()?;
-    let thread = first.rpc("thread/start", json!({})).await?["thread"]["id"].clone();
-    second
-        .rpc("thread/resume", json!({"threadId": thread}))
-        .await?;
-    first
-        .rpc(
-            "thread/name/set",
-            json!({"threadId": thread, "name": "shared"}),
-        )
-        .await?;
-    assert_eq!(
-        first.event("thread/name/updated").await?,
-        second.event("thread/name/updated").await?
-    );
-    first.disconnect().await?;
-    assert_eq!(daemon.pid_record()?, pid);
-    second
-        .rpc(
-            "thread/name/set",
-            json!({"threadId": thread, "name": "still running"}),
-        )
-        .await?;
-    let mut third = Client::connect(&daemon).await?;
-    assert_eq!(daemon.pid_record()?, pid);
-    assert_eq!(
-        third
+    MockResponsesConfig::new(&server.uri())
+        .with_root_config("analytics.enabled = false")
+        .write(daemon.home.path())?;
+    let result: Result<()> = async {
+        // Both clients attempt startup before either waits for readiness.
+        let (first, second) = tokio::try_join!(Client::connect(&daemon), Client::connect(&daemon))?;
+        let mut first = first;
+        let mut second = second;
+        let pid = daemon.pid_record()?;
+        let thread = first.start_persisted_thread().await?;
+        second
             .rpc("thread/resume", json!({"threadId": thread}))
-            .await?["thread"]["name"],
-        "still running"
-    );
-    let output = daemon
-        .command()
-        .args(["-c", "model=other", "app-server", "proxy", "--start-daemon"])
-        .output()
-        .await?;
-    assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)?.contains("does not accept configuration overrides"));
-    assert_eq!(daemon.pid_record()?, pid);
-    second
-        .rpc(
-            "thread/name/set",
-            json!({"threadId": thread, "name": "unchanged owner"}),
-        )
-        .await?;
-    second.disconnect().await?;
-    third.disconnect().await?;
-    let fourth = Client::connect(&daemon).await?;
-    assert_eq!(daemon.pid_record()?, pid);
-    fourth.disconnect().await?;
+            .await?;
+        first
+            .rpc(
+                "thread/name/set",
+                json!({"threadId": thread, "name": "shared"}),
+            )
+            .await?;
+        assert_eq!(
+            first.event("thread/name/updated").await?,
+            second.event("thread/name/updated").await?
+        );
+        first.disconnect().await?;
+        assert_eq!(daemon.pid_record()?, pid);
+        second
+            .rpc(
+                "thread/name/set",
+                json!({"threadId": thread, "name": "still running"}),
+            )
+            .await?;
+        let mut third = Client::connect(&daemon).await?;
+        assert_eq!(daemon.pid_record()?, pid);
+        assert_eq!(
+            third
+                .rpc("thread/resume", json!({"threadId": thread}))
+                .await?["thread"]["name"],
+            "still running"
+        );
+        let output = daemon
+            .command()
+            .args(["-c", "model=other", "app-server", "proxy", "--start-daemon"])
+            .output()
+            .await?;
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)?.contains("does not accept configuration overrides")
+        );
+        assert_eq!(daemon.pid_record()?, pid);
+        second
+            .rpc(
+                "thread/name/set",
+                json!({"threadId": thread, "name": "unchanged owner"}),
+            )
+            .await?;
+        second.disconnect().await?;
+        third.disconnect().await?;
+        let fourth = Client::connect(&daemon).await?;
+        assert_eq!(daemon.pid_record()?, pid);
+        fourth.disconnect().await?;
+        Ok(())
+    }
+    .await;
+    // Surface the original error before the mock's drop-time request-count assertion.
+    result.expect("shared daemon lifecycle regression");
     Ok(())
 }
 
@@ -320,6 +350,7 @@ async fn managed_proxy_rejects_process_specific_environment() -> Result<()> {
 #[tokio::test]
 async fn shared_proxy_queue_approvals_and_reconnect_use_one_owner() -> Result<()> {
     let server = create_mock_responses_server_sequence(vec![
+        create_final_assistant_message_sse_response("ready")?,
         create_escalated_command_execution_sse_response(
             vec!["echo".into(), "approval".into()],
             /*workdir*/ None,
@@ -332,12 +363,13 @@ async fn shared_proxy_queue_approvals_and_reconnect_use_one_owner() -> Result<()
     ])
     .await;
     let daemon = Daemon::new()?;
+    let result: Result<()> = async {
     MockResponsesConfig::new(&server.uri())
         .with_approval_policy("on-request")
         .with_root_config("approvals_reviewer = \"user\"\nanalytics.enabled = false")
         .write(daemon.home.path())?;
     let mut first = Client::connect(&daemon).await?;
-    let thread = first.rpc("thread/start", json!({})).await?["thread"]["id"].clone();
+    let thread = first.start_persisted_thread().await?;
     let mut second = Client::connect(&daemon).await?;
     second
         .rpc("thread/resume", json!({"threadId": thread}))
@@ -460,5 +492,8 @@ async fn shared_proxy_queue_approvals_and_reconnect_use_one_owner() -> Result<()
     assert_eq!(accepted, expected);
     first.disconnect().await?;
     second.disconnect().await?;
+    Ok(())
+    }.await;
+    result.expect("shared queue, subscriptions, and approval regression");
     Ok(())
 }
