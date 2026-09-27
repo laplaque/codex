@@ -25,6 +25,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        env:
+          # Git must leave LF files as LF on Windows before any formatter runs.
+          GIT_CONFIG_COUNT: ${{ runner.os == 'Windows' && '1' || '0' }}
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           persist-credentials: false
       - name: Record revision and original local failure
@@ -69,12 +74,13 @@ jobs:
           just --version
           cargo nextest --version
       - name: CLI suite
+        if: runner.os != 'Windows'
         run: just test -p codex-cli
       - name: Existing lifecycle suite
-        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.versions.outcome == 'success' }}
         run: just test -p codex-app-server-daemon
       - name: Existing proxy transport suite
-        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.versions.outcome == 'success' }}
         run: just test -p codex-stdio-to-uds
       - uses: ./.github/actions/setup-rusty-v8
         id: v8
@@ -83,21 +89,27 @@ jobs:
           target: ${{ steps.versions.outputs.target }}
       - name: Build runtime helpers required by the app-server suite
         id: helpers
-        if: ${{ !cancelled() && steps.v8.outcome == 'success' }}
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.v8.outcome == 'success' }}
         working-directory: codex-rs
         run: cargo build -p codex-code-mode-host -p codex-rmcp-client --bins
       - name: Existing app-server suite
-        if: ${{ !cancelled() && steps.helpers.outcome == 'success' }}
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.helpers.outcome == 'success' }}
         run: just test -p codex-app-server
+      - name: Windows standard-user validation
+        if: ${{ runner.os == 'Windows' && !cancelled() && steps.versions.outcome == 'success' }}
+        shell: pwsh
+        env:
+          MANAGED_PROXY_V8_READY: ${{ steps.v8.outcome == 'success' }}
+        run: ./.github/scripts/managed-proxy-run-windows.ps1
       # Repository instructions require fix/fmt last, with no test rerun after them.
       - name: CLI lint fixes
-        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.versions.outcome == 'success' }}
         run: just fix -p codex-cli
       - name: Repository formatting
-        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.versions.outcome == 'success' }}
         run: just fmt
       - name: Require fixers to leave the tested revision unchanged
-        if: ${{ !cancelled() && steps.versions.outcome == 'success' }}
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.versions.outcome == 'success' }}
         run: |
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
