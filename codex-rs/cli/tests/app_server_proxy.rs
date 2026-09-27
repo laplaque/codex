@@ -27,6 +27,28 @@ use tokio_tungstenite::tungstenite::Message;
 
 const DEADLINE: Duration = Duration::from_secs(60);
 
+const REJECTED_PROXY_OPTIONS: &[&[&str]] = &[
+    &["-c", "model=other"],
+    &["--enable", "daemon_auto_start"],
+    &["--disable", "daemon_auto_start"],
+    &["--model", "other"],
+    &["--oss"],
+    &["--local-provider", "ollama"],
+    &["--sandbox", "read-only"],
+    &["--ask-for-approval", "never"],
+    &["--approve-for-me"],
+    &["--dangerously-bypass-approvals-and-sandbox"],
+    &["--dangerously-bypass-hook-trust"],
+    &["--search"],
+    &["--no-daemon"],
+    &["--cd", "."],
+    &["--add-dir", "."],
+    // --image accepts multiple values, so another option separates it from the subcommand.
+    &["--image=fixture.png", "--no-alt-screen"],
+    &["initial prompt"],
+    &["--no-alt-screen"],
+];
+
 struct Daemon {
     home: TempDir,
     binary: PathBuf,
@@ -250,22 +272,31 @@ async fn managed_proxy_starts_once_and_disconnect_leaves_other_client_alive() ->
                 .await?["thread"]["name"],
             "still running"
         );
-        let output = daemon
-            .command()
-            .args(["-c", "model=other", "app-server", "proxy", "--start-daemon"])
-            .output()
-            .await?;
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8(output.stderr)?.contains("does not accept configuration overrides")
-        );
-        assert_eq!(daemon.pid_record()?, pid);
-        second
-            .rpc(
-                "thread/name/set",
-                json!({"threadId": thread, "name": "unchanged owner"}),
+        for options in REJECTED_PROXY_OPTIONS {
+            let output = timeout(
+                DEADLINE,
+                daemon
+                    .command()
+                    .args(*options)
+                    .args(["app-server", "proxy", "--start-daemon"])
+                    .output(),
             )
-            .await?;
+            .await??;
+            assert!(!output.status.success(), "{options:?}");
+            assert!(output.stdout.is_empty(), "{options:?}");
+            assert!(
+                String::from_utf8(output.stderr)?
+                    .contains("does not accept configuration overrides"),
+                "{options:?}"
+            );
+            assert_eq!(daemon.pid_record()?, pid, "{options:?}");
+            second
+                .rpc(
+                    "thread/name/set",
+                    json!({"threadId": thread, "name": "unchanged owner"}),
+                )
+                .await?;
+        }
         second.disconnect().await?;
         third.disconnect().await?;
         let fourth = Client::connect(&daemon).await?;
@@ -304,28 +335,23 @@ async fn managed_proxy_startup_failure_is_not_a_protocol_response() -> Result<()
 #[tokio::test]
 async fn managed_proxy_rejects_configuration_before_starting() -> Result<()> {
     let daemon = Daemon::new()?;
-    for options in [
-        vec!["-c", "model=other"],
-        vec!["--enable", "daemon_auto_start"],
-        vec!["--disable", "daemon_auto_start"],
-        vec!["--model", "other"],
-        vec!["--sandbox", "read-only"],
-        vec!["--ask-for-approval", "never"],
-        vec!["--no-daemon"],
-        vec!["--cd", "."],
-    ] {
-        let output = daemon
-            .command()
-            .args(options)
-            .args(["app-server", "proxy", "--start-daemon"])
-            .output()
-            .await?;
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
+    for options in REJECTED_PROXY_OPTIONS {
+        let output = timeout(
+            DEADLINE,
+            daemon
+                .command()
+                .args(*options)
+                .args(["app-server", "proxy", "--start-daemon"])
+                .output(),
+        )
+        .await??;
+        assert!(!output.status.success(), "{options:?}");
+        assert!(output.stdout.is_empty(), "{options:?}");
         assert!(
-            String::from_utf8(output.stderr)?.contains("does not accept configuration overrides")
+            String::from_utf8(output.stderr)?.contains("does not accept configuration overrides"),
+            "{options:?}"
         );
-        assert!(daemon.pid_record().is_err());
+        assert!(daemon.pid_record().is_err(), "{options:?}");
     }
     Ok(())
 }
