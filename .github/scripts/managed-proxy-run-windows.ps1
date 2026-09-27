@@ -87,9 +87,12 @@ try {
         $value = [Environment]::GetEnvironmentVariable($key)
         if ($value) { $childEnvironment[$key] = $value }
     }
-    foreach ($key in @('SystemRoot', 'windir', 'ComSpec', 'PATHEXT', 'SystemDrive', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432')) {
-        $value = [Environment]::GetEnvironmentVariable($key, 'Machine')
+    foreach ($key in @('SystemRoot', 'windir', 'ComSpec', 'PATHEXT', 'SystemDrive', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'ProgramData')) {
+        $value = [Environment]::GetEnvironmentVariable($key)
         if ($value) { $childEnvironment[$key] = $value }
+    }
+    if (-not $childEnvironment['SystemRoot'] -or -not $childEnvironment['ComSpec']) {
+        throw 'Required Windows process environment is unavailable'
     }
     $machinePath = $env:PATH -split ';' | Where-Object {
         $_ -and -not $_.StartsWith($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase) -and
