@@ -3,8 +3,11 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 # Check the actual process token before invoking any daemon or test executable.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not $env:MANAGED_PROXY_EXPECTED_SID) {
+    throw "Expected standard-user SID was not delivered to child; actual SID $($identity.User.Value)"
+}
 if ($identity.User.Value -ne $env:MANAGED_PROXY_EXPECTED_SID) {
-    throw "Child SID differs from the newly created standard-user SID"
+    throw "Child SID $($identity.User.Value) differs from expected SID $env:MANAGED_PROXY_EXPECTED_SID"
 }
 $groups = & whoami.exe /groups /fo csv /nh | ConvertFrom-Csv -Header Name, Type, SID, Attributes
 if ($LASTEXITCODE -ne 0 -or @($groups | Where-Object SID -eq 'S-1-5-32-544').Count -ne 0) {

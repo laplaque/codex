@@ -17,7 +17,6 @@ try {
     if (-not (Get-LocalGroupMember -Group 'Users' | Where-Object { $_.SID.Value -eq $account.SID.Value })) {
         Add-LocalGroupMember -Group 'Users' -Member $account -ErrorAction Stop
     }
-    $credential = [pscredential]::new("$env:COMPUTERNAME\$name", $password)
     $sid = $account.SID.Value
     $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
@@ -84,6 +83,14 @@ try {
         $value = [Environment]::GetEnvironmentVariable($key)
         if ($value) { $childEnvironment[$key] = $value }
     }
+    foreach ($key in @('CARGO_INCREMENTAL', 'CARGO_TERM_COLOR')) {
+        $value = [Environment]::GetEnvironmentVariable($key)
+        if ($value) { $childEnvironment[$key] = $value }
+    }
+    foreach ($key in @('SystemRoot', 'windir', 'ComSpec', 'PATHEXT', 'SystemDrive', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432')) {
+        $value = [Environment]::GetEnvironmentVariable($key, 'Machine')
+        if ($value) { $childEnvironment[$key] = $value }
+    }
     $machinePath = $env:PATH -split ';' | Where-Object {
         $_ -and -not $_.StartsWith($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase) -and
         -not $_.StartsWith($env:RUNNER_TEMP, [StringComparison]::OrdinalIgnoreCase)
@@ -93,15 +100,44 @@ try {
     Invoke-Icacls $env:GITHUB_WORKSPACE '/grant:r' ("*${sid}:(OI)(CI)M") '/T'
     $stdout = Join-Path $taskRoot 'stdout.log'
     $stderr = Join-Path $taskRoot 'stderr.log'
-    $child = Start-Process -FilePath (Get-Command pwsh.exe).Source `
-        -ArgumentList @('-NoLogo', '-NoProfile', '-File', (Join-Path $env:GITHUB_WORKSPACE '.github/scripts/managed-proxy-validate-windows.ps1')) `
-        -Credential $credential -LoadUserProfile -UseNewEnvironment -Environment $childEnvironment `
-        -WorkingDirectory (Join-Path $env:GITHUB_WORKSPACE 'codex-rs') `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -ErrorAction Stop
-    $child.WaitForExit()
+    # Start-Process ignores its -Environment hashtable when -Credential and
+    # -UseNewEnvironment are combined. ProcessStartInfo sends the explicit block.
+    $startInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
+    foreach ($argument in @('-NoLogo', '-NoProfile', '-File', (Join-Path $env:GITHUB_WORKSPACE '.github/scripts/managed-proxy-validate-windows.ps1'))) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $startInfo.UserName = $name
+    $startInfo.Domain = $env:COMPUTERNAME
+    $startInfo.Password = $password
+    $startInfo.LoadUserProfile = $true
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WorkingDirectory = Join-Path $env:GITHUB_WORKSPACE 'codex-rs'
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.Environment.Clear()
+    foreach ($entry in $childEnvironment.GetEnumerator()) { $startInfo.Environment[$entry.Key] = $entry.Value }
+    $child = [Diagnostics.Process]::new()
+    $child.StartInfo = $startInfo
+    $stdoutStream = $null
+    $stderrStream = $null
+    try {
+        if (-not $child.Start()) { throw 'Could not start standard-user validation process' }
+        $stdoutStream = [IO.File]::Create($stdout)
+        $stderrStream = [IO.File]::Create($stderr)
+        $stdoutCopy = $child.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+        $stderrCopy = $child.StandardError.BaseStream.CopyToAsync($stderrStream)
+        $child.WaitForExit()
+        [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutCopy, $stderrCopy))
+        $exitCode = $child.ExitCode
+    } finally {
+        if ($stdoutStream) { $stdoutStream.Dispose() }
+        if ($stderrStream) { $stderrStream.Dispose() }
+        $child.Dispose()
+    }
     Get-Content $stdout | Write-Host
     Get-Content $stderr | Write-Host
-    if ($child.ExitCode -ne 0) { throw "Standard-user validation failed with exit code $($child.ExitCode)" }
+    if ($exitCode -ne 0) { throw "Standard-user validation failed with exit code $exitCode" }
 } finally {
     if ($account) { Remove-LocalUser -Name $name -ErrorAction Stop }
 }
