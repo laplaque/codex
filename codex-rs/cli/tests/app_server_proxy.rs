@@ -217,20 +217,22 @@ impl Client {
         eprintln!("proxy {:?}: disconnect", self.child.id());
         self.ws.send(Message::Close(None)).await?;
         timeout(DEADLINE, async {
-            let mut acknowledged = false;
             while let Some(message) = self.ws.next().await {
                 if matches!(message?, Message::Close(_)) {
-                    acknowledged = true;
+                    return Ok::<(), anyhow::Error>(());
                 }
             }
-            ensure!(
-                acknowledged,
-                "proxy closed without WebSocket close acknowledgment"
-            );
-            Ok::<(), anyhow::Error>(())
+            anyhow::bail!("proxy closed without WebSocket close acknowledgment")
         })
         .await??;
-        drop(self.ws);
+        let (mut stdout, stdin) = self.ws.into_inner().into_inner();
+        // The relay needs stdin EOF before it can close stdout; keep reading stdout until then.
+        drop(stdin);
+        timeout(
+            DEADLINE,
+            tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
+        )
+        .await??;
         ensure!(
             timeout(DEADLINE, self.child.wait()).await??.success(),
             "proxy exit"
