@@ -52,6 +52,10 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
+mod app_server_proxy;
+#[cfg(test)]
+#[path = "app_server_proxy_tests.rs"]
+mod app_server_proxy_tests;
 mod cloud_config;
 mod daemon_install;
 mod daemon_telemetry;
@@ -77,6 +81,7 @@ mod state_db_recovery;
 #[cfg(not(windows))]
 mod wsl_paths;
 
+use crate::app_server_proxy::AppServerProxyCommand;
 use crate::exec_server_command::ExecServerCommand;
 use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
@@ -677,13 +682,6 @@ enum AppServerDaemonSubcommand {
 }
 
 #[derive(Debug, Args)]
-struct AppServerProxyCommand {
-    /// Path to the app-server Unix domain socket to connect to.
-    #[arg(long = "sock", value_name = "SOCKET_PATH", value_parser = parse_socket_path)]
-    socket_path: Option<AbsolutePathBuf>,
-}
-
-#[derive(Debug, Args)]
 struct AppServerBootstrapCommand {
     /// Launch the managed app-server with remote control enabled.
     #[arg(long = "remote-control")]
@@ -1217,6 +1215,7 @@ async fn cli_main(
             }
         }
         Some(Subcommand::AppServer(app_server_cli)) => {
+            app_server_proxy::validate(&app_server_cli, &root_config_overrides, &interactive)?;
             let AppServerCommand {
                 subcommand,
                 code_mode_host,
@@ -1380,14 +1379,7 @@ async fn cli_main(
                     }
                 },
                 Some(AppServerSubcommand::Proxy(proxy_cli)) => {
-                    let socket_path = match proxy_cli.socket_path {
-                        Some(socket_path) => socket_path,
-                        None => {
-                            let codex_home = find_codex_home()?;
-                            codex_app_server::app_server_control_socket_path(&codex_home)?
-                        }
-                    };
-                    codex_stdio_to_uds::run(socket_path.as_path()).await?;
+                    app_server_proxy::run(proxy_cli).await?;
                 }
                 Some(AppServerSubcommand::GenerateTs(gen_cli)) => {
                     let options = codex_app_server_protocol::GenerateTsOptions {
@@ -4593,7 +4585,8 @@ mod tests {
         assert!(matches!(
             app_server.subcommand,
             Some(AppServerSubcommand::Proxy(AppServerProxyCommand {
-                socket_path: None
+                socket_path: None,
+                start_daemon: false,
             }))
         ));
     }
@@ -4680,7 +4673,10 @@ mod tests {
 
     #[test]
     fn reject_remote_auth_token_env_for_app_server_proxy() {
-        let subcommand = AppServerSubcommand::Proxy(AppServerProxyCommand { socket_path: None });
+        let subcommand = AppServerSubcommand::Proxy(AppServerProxyCommand {
+            socket_path: None,
+            start_daemon: false,
+        });
         let err = reject_remote_mode_for_app_server_subcommand(
             /*remote*/ None,
             Some("CODEX_REMOTE_AUTH_TOKEN"),

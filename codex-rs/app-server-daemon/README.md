@@ -73,6 +73,54 @@ an integer from 0 through 300. Zero forces shutdown immediately after requesting
 a graceful exit; the five-minute maximum bounds the wait even if a turn is still
 running.
 
+## Managed proxy integration entry point
+
+```sh
+codex app-server proxy --start-daemon
+```
+
+This explicit option runs the existing idempotent `daemon start` lifecycle and
+then connects the existing byte proxy to its default control socket. Concurrent
+starts use the existing per-`CODEX_HOME` lifecycle lock. A ready server is reused;
+it is not restarted or reconfigured. Installation prerequisites, saved remote
+control preferences, automatic updater behavior, socket permissions,
+authentication, and thread writer locks remain those of the existing lifecycle.
+Startup failure exits nonzero with diagnostics on stderr and no protocol output
+on stdout. There is no fallback to a separate app-server. Disconnecting a proxy
+closes only its connection; it does not stop the server or other clients.
+
+The option rejects `--sock`, CLI configuration overrides (`-c`, `--enable`,
+`--disable`), interactive options (including model, sandbox, approval policy, and
+working directory), profiles, strict-config, server launch settings, and process-specific
+executor/workload-identity selection. This applies whether the daemon is absent
+or already running. Configure the daemon persistently and use its normal restart
+lifecycle to apply changes; supported per-thread options belong in RPC requests.
+Other environment variables are inherited only when the daemon starts, not on
+each attachment. Bare `codex app-server` and proxy without `--start-daemon`
+retain their existing behavior.
+
+The private VS Code client would need to launch this exact command with the same
+`CODEX_HOME` as the server used by Android, speak **WebSocket framing and handshake
+over the child stdin/stdout pipes** (not newline-delimited stdio JSON-RPC), and
+perform `initialize`, `initialized`, and `thread/resume` on that connection.
+Both clients then attach to the same owner and its existing subscriptions.
+Clients wanting shared queued messages must opt into the experimental API and
+use `thread/queue/add` and the existing queue notifications/list RPCs; explicit
+steering remains `turn/steer`. This entry point does not change `turn/start`
+semantics or add a queue, scheduler, approval handler, or event broadcaster.
+
+This public change does **not** change released VS Code behavior or by itself
+fix simultaneous Android/VS Code access. Private-client adoption is required.
+The observed working CLI/Android combination motivates shared ownership as the
+leading hypothesis; its actual process topology has not been independently
+verified. Tests of proxy clients are not end-to-end tests of those products.
+
+Related reports: [#27565](https://github.com/openai/codex/issues/27565),
+[#46652](https://github.com/openai/codex/issues/46652),
+[#40973](https://github.com/openai/codex/issues/40973),
+[#40167](https://github.com/openai/codex/issues/40167), and
+[#34767](https://github.com/openai/codex/issues/34767).
+
 ## Bootstrap flow
 
 For a new Linux or macOS machine:
