@@ -162,7 +162,10 @@ try {
             # A test descendant may retain a pipe after the validation process
             # exits. Give buffered lines a brief drain, then honor that exit.
             if ($child.HasExited -and -not $drainDeadline) { $drainDeadline = [DateTime]::UtcNow.AddSeconds(2) }
-            if ($drainDeadline -and [DateTime]::UtcNow -ge $drainDeadline) { break }
+            if ($drainDeadline -and [DateTime]::UtcNow -ge $drainDeadline) {
+                Write-Warning 'Stopped draining child output after exit; a descendant may retain a pipe and output may be incomplete.'
+                break
+            }
         }
         $child.WaitForExit()
         $exitCode = $child.ExitCode
