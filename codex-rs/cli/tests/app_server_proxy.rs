@@ -215,16 +215,8 @@ impl Client {
 
     async fn disconnect(mut self) -> Result<()> {
         eprintln!("proxy {:?}: disconnect", self.child.id());
-        self.ws.send(Message::Close(None)).await?;
-        timeout(DEADLINE, async {
-            while let Some(message) = self.ws.next().await {
-                if matches!(message?, Message::Close(_)) {
-                    return Ok::<(), anyhow::Error>(());
-                }
-            }
-            anyhow::bail!("proxy closed without WebSocket close acknowledgment")
-        })
-        .await??;
+        // The server can stop its writer on Close without sending a peer acknowledgment.
+        self.ws.close(/*msg*/ None).await?;
         let (mut stdout, stdin) = self.ws.into_inner().into_inner();
         // The relay needs stdin EOF before it can close stdout; keep reading stdout until then.
         drop(stdin);
