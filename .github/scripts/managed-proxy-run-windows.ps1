@@ -123,24 +123,54 @@ try {
     foreach ($entry in $childEnvironment.GetEnumerator()) { $startInfo.Environment[$entry.Key] = $entry.Value }
     $child = [Diagnostics.Process]::new()
     $child.StartInfo = $startInfo
-    $stdoutStream = $null
-    $stderrStream = $null
+    $stdoutWriter = $null
+    $stderrWriter = $null
     try {
         if (-not $child.Start()) { throw 'Could not start standard-user validation process' }
-        $stdoutStream = [IO.File]::Create($stdout)
-        $stderrStream = [IO.File]::Create($stderr)
-        $stdoutCopy = $child.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
-        $stderrCopy = $child.StandardError.BaseStream.CopyToAsync($stderrStream)
+        $stdoutWriter = [IO.StreamWriter]::new($stdout)
+        $stderrWriter = [IO.StreamWriter]::new($stderr)
+        $stdoutRead = $child.StandardOutput.ReadLineAsync()
+        $stderrRead = $child.StandardError.ReadLineAsync()
+        $drainDeadline = $null
+        while ($stdoutRead -or $stderrRead) {
+            $pending = [Collections.Generic.List[Threading.Tasks.Task]]::new()
+            if ($stdoutRead) { $pending.Add($stdoutRead) }
+            if ($stderrRead) { $pending.Add($stderrRead) }
+            [void][Threading.Tasks.Task]::WaitAny($pending.ToArray(), 1000)
+            if ($stdoutRead -and $stdoutRead.IsCompleted) {
+                $line = $stdoutRead.GetAwaiter().GetResult()
+                if ($null -eq $line) {
+                    $stdoutRead = $null
+                } else {
+                    $stdoutWriter.WriteLine($line)
+                    $stdoutWriter.Flush()
+                    Write-Host $line
+                    $stdoutRead = $child.StandardOutput.ReadLineAsync()
+                }
+            }
+            if ($stderrRead -and $stderrRead.IsCompleted) {
+                $line = $stderrRead.GetAwaiter().GetResult()
+                if ($null -eq $line) {
+                    $stderrRead = $null
+                } else {
+                    $stderrWriter.WriteLine($line)
+                    $stderrWriter.Flush()
+                    Write-Host $line
+                    $stderrRead = $child.StandardError.ReadLineAsync()
+                }
+            }
+            # A test descendant may retain a pipe after the validation process
+            # exits. Give buffered lines a brief drain, then honor that exit.
+            if ($child.HasExited -and -not $drainDeadline) { $drainDeadline = [DateTime]::UtcNow.AddSeconds(2) }
+            if ($drainDeadline -and [DateTime]::UtcNow -ge $drainDeadline) { break }
+        }
         $child.WaitForExit()
-        [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutCopy, $stderrCopy))
         $exitCode = $child.ExitCode
     } finally {
-        if ($stdoutStream) { $stdoutStream.Dispose() }
-        if ($stderrStream) { $stderrStream.Dispose() }
+        if ($stdoutWriter) { $stdoutWriter.Dispose() }
+        if ($stderrWriter) { $stderrWriter.Dispose() }
         $child.Dispose()
     }
-    Get-Content $stdout | Write-Host
-    Get-Content $stderr | Write-Host
     if ($exitCode -ne 0) { throw "Standard-user validation failed with exit code $exitCode" }
 } finally {
     if ($account) { Remove-LocalUser -Name $name -ErrorAction Stop }
